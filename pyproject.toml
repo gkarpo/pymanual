@@ -1,0 +1,29 @@
+[project]
+name = "pymanual"
+version = "0.1.0"
+description = "Resolve the documentation URL for any Python module or PyPI distribution name."
+readme = "README.md"
+authors = [
+    { name = "George Karpodinis", email = "karpoulas@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+keywords = ["documentation", "docs", "python", "pypi", "module", "cli", "url-resolver"]
+
+[project.urls]
+Homepage = "https://github.com/gkarpo/pymanual"
+Repository = "https://github.com/gkarpo/pymanual"
+Issues = "https://github.com/gkarpo/pymanual/issues"
+
+[project.scripts]
+pymanual = "pymanual._cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+]
