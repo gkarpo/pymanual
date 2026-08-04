@@ -67,10 +67,19 @@ def test_local_module_returns_local_status(tmp_path, monkeypatch):
         sys.modules.pop("mylocalmod", None)
 
 
-def test_unresolvable_path_when_getfile_fails():
-    fake = object()
-    with mock.patch("pymanual._resolver.import_module", return_value=fake):
-        assert resolve_doc_url("whatever") == STATUS_UNRESOLVABLE_PATH
+def test_unresolvable_path_when_spec_has_no_usable_origin(tmp_path, monkeypatch):
+    """A namespace package has a spec but no origin, so there's nothing to classify.
+
+    Replaces a version of this test that patched ``_resolver.import_module``
+    with a bare ``object()``. Real coverage of the other no-origin routes
+    (frozen modules, deleted sources) lives in ``test_characterization.py``.
+    """
+    (tmp_path / "nsonly").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        assert resolve_doc_url("nsonly", network=False) == STATUS_UNRESOLVABLE_PATH
+    finally:
+        sys.modules.pop("nsonly", None)
 
 
 def test_cache_hit_short_circuits_pipeline():

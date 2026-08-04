@@ -73,12 +73,8 @@ def _side_effect_source(sentinel) -> str:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="import_module() executes the target module; spec.md §1 and §4 Step 2 "
-    "require resolution not to run the module's code. Fixed by find_spec.",
-)
 def test_resolution_does_not_execute_module_code(tmp_path, importable):
+    """spec.md §1: resolving a name must not run that module's code."""
     sentinel = tmp_path / "leaf-executed.flag"
     importable("sideeffect_mod", _side_effect_source(sentinel))
 
@@ -86,11 +82,8 @@ def test_resolution_does_not_execute_module_code(tmp_path, importable):
     assert not sentinel.exists(), "resolving the module executed its top-level code"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Leaf of a dotted name is executed today; find_spec never executes the leaf.",
-)
 def test_dotted_leaf_module_is_not_executed(tmp_path, importable):
+    """find_spec resolves the leaf from its parent's __path__ without running it."""
     sentinel = tmp_path / "dotted-leaf-executed.flag"
     importable("sepkg.leaf", _side_effect_source(sentinel))
 
@@ -182,29 +175,32 @@ def test_builtin_modules_resolve_to_stdlib_docs(name):
     assert resolve_doc_url(name, network=False, use_cache=False) == _PY_DOCS.format(name=name)
 
 
-def test_frozen_module_resolves_to_stdlib_docs():
-    """``zipimport`` is frozen (``spec.origin == 'frozen'``) but has a real docs page.
+@pytest.mark.parametrize("name", ["zipimport", "os", "io", "abc", "codecs", "stat"])
+def test_frozen_modules_resolve_to_stdlib_docs(name):
+    """CPython freezes a chunk of the bootstrap stdlib: ``spec.origin == 'frozen'``.
 
-    Today it still resolves by path — the imported module keeps a ``__file__``
-    pointing at ``zipimport.py``. After the find_spec migration the origin is
-    the string ``'frozen'``, no path exists, and the
-    ``sys.stdlib_module_names`` fallback is what keeps this answer correct.
-    Either way the URL must not change.
+    These have no usable path at all, so the ``sys.stdlib_module_names`` check
+    is the only thing that answers for them — without it every name here
+    returns ``unresolvable_module_path``. ``os`` and ``io`` are ordinary
+    lookups, so this is a load-bearing path, not an edge case.
+
+    (Before the find_spec migration they resolved by path instead: the
+    imported module object still carries a ``__file__``. The URL is the same
+    either way, which is what this pins.)
     """
-    assert resolve_doc_url("zipimport", network=False, use_cache=False) == _PY_DOCS.format(
-        name="zipimport"
-    )
+    assert resolve_doc_url(name, network=False, use_cache=False) == _PY_DOCS.format(name=name)
 
 
-def test_frozen_module_is_not_rescued_by_the_builtin_short_circuit():
-    """Pins *which* mechanism answers for zipimport.
+def test_frozen_modules_are_not_rescued_by_the_builtin_short_circuit():
+    """Pins *which* mechanism answers for frozen modules.
 
-    It is not in ``sys.builtin_module_names``, so the Step 1 fast path never
-    sees it — if the name-based stdlib fallback regresses, this stops being a
-    silent pass elsewhere.
+    They are not in ``sys.builtin_module_names``, so the Step 1 fast path
+    never sees them — if the name-based stdlib fallback regresses, this stops
+    being a silent pass elsewhere.
     """
-    assert "zipimport" not in sys.builtin_module_names
-    assert "zipimport" in sys.stdlib_module_names
+    for name in ("zipimport", "os", "io"):
+        assert name not in sys.builtin_module_names
+        assert name in sys.stdlib_module_names
 
 
 @pytest.mark.parametrize("name", ["winreg", "tkinter"])
@@ -295,12 +291,12 @@ def test_empty_string_returns_status_token():
     assert resolve_doc_url("", network=False, use_cache=False) == STATUS_NOT_FOUND
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Raises TypeError from import_module (relative import needs a package). "
-    "find_spec raises ImportError instead, which the resolver already catches.",
-)
 def test_relative_name_returns_status_token():
+    """``find_spec`` raises ImportError for a relative name, which we catch.
+
+    ``import_module`` raised TypeError here, which escaped uncaught. The
+    empty-string half of that bug is unfixed — see the test below.
+    """
     assert resolve_doc_url(".foo", network=False, use_cache=False) == STATUS_NOT_FOUND
 
 
@@ -318,6 +314,18 @@ def test_missing_leaf_under_stdlib_parent_falls_back_to_parent():
 
 def test_missing_leaf_under_third_party_parent_resolves_via_parent():
     url = resolve_doc_url("pytest.nosuchthing", network=False, use_cache=False)
+    assert url.startswith("http") and "pytest" in url
+
+
+def test_missing_leaf_uses_import_name_to_distribution_mapping():
+    """spec.md §4 Step 2a, the case the distribution fallback can't handle.
+
+    ``_pytest`` is installed but no distribution is *named* ``_pytest`` — the
+    mapping to ``pytest`` lives in ``packages_distributions()``, which only the
+    third-party path consults. Without the top-level retry this reaches the
+    distribution fallback instead and returns ``module_not_found`` offline.
+    """
+    url = resolve_doc_url("_pytest.nosuchthing", network=False, use_cache=False)
     assert url.startswith("http") and "pytest" in url
 
 
