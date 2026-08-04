@@ -6,7 +6,11 @@ Resolution strategy, in order:
 2. Importable modules → classify the file path and map:
    stdlib → ``docs.python.org``, third-party → installed or PyPI metadata,
    local → ``STATUS_LOCAL``.
-3. Non-importable names → try treating the name as a PyPI distribution.
+3. Names with no usable file path, and stdlib names that aren't importable in
+   this environment → ``sys.stdlib_module_names`` decides. Consulted only
+   after a path lookup fails, so a local file shadowing a stdlib name still
+   classifies by its path.
+4. Anything left → try treating the name as a PyPI distribution.
 
 Outcomes that aren't URLs surface as ``STATUS_*`` tokens so callers can
 distinguish them from real URLs without exceptions.
@@ -32,6 +36,25 @@ STATUS_LOCAL = "local_module_no_external_docs"
 
 _STATUS_TOKENS = frozenset([STATUS_NOT_FOUND, STATUS_UNRESOLVABLE_PATH, STATUS_LOCAL])
 _STDLIB_DOC_URL = "https://docs.python.org/3/library/{name}.html"
+
+
+def _stdlib_page(top_level: str) -> str:
+    """Return the docs.python.org page for a name already known to be stdlib."""
+    return _STDLIB_DOC_URL.format(name=top_level)
+
+
+def _is_stdlib_name(top_level: str) -> bool:
+    """True when the *name* is stdlib, independent of any file path.
+
+    ``sys.stdlib_module_names`` is generated at build time and lists every
+    stdlib top-level name unconditionally — including modules belonging to
+    other platforms (``winreg`` on Linux) and ones this build omitted
+    (``tkinter`` without the Tk headers). That makes it the right answer for
+    modules with no usable path, but the *wrong* thing to consult first: a
+    local ``statistics.py`` shadowing a stdlib name must classify by its path.
+    Callers only reach this after a path lookup has come up empty.
+    """
+    return top_level in sys.stdlib_module_names
 
 
 def resolve_doc_url(
@@ -68,7 +91,7 @@ def _resolve(module_name: str, *, network: bool) -> str:
     # Built-ins are checked before import_module() because inspect.getfile raises
     # TypeError on them — there's no path to classify.
     if top_level in sys.builtin_module_names:
-        return _STDLIB_DOC_URL.format(name=top_level)
+        return _stdlib_page(top_level)
 
     # import_module is the documented way to import by dotted name. It raises
     # ImportError (incl. ModuleNotFoundError) for unknown/invalid names and
@@ -76,8 +99,16 @@ def _resolve(module_name: str, *, network: bool) -> str:
     try:
         obj: Any = import_module(module_name)
     except (ImportError, ValueError):
-        # Name isn't importable here, but it may still be a known PyPI
-        # distribution (e.g. the user isn't in the env where it's installed).
+        # Not importable *here* doesn't mean not stdlib: winreg on Linux and
+        # tkinter on a build without Tk are both documented modules. Answer
+        # from the name before falling through to PyPI, so a project that
+        # happens to share a stdlib name can't hijack the result. This also
+        # covers a missing leaf under a real stdlib parent — json.nosuchthing
+        # yields json's page rather than reaching the distribution fallback.
+        if _is_stdlib_name(top_level):
+            return _stdlib_page(top_level)
+        # Otherwise it may still be a known PyPI distribution (e.g. the user
+        # isn't in the env where it's installed).
         url = resolve_distribution_url(module_name, network=network)
         if url is not None:
             return url
@@ -86,14 +117,19 @@ def _resolve(module_name: str, *, network: bool) -> str:
     try:
         path = inspect.getfile(cast(Any, obj))
     except TypeError:
-        return STATUS_UNRESOLVABLE_PATH
+        path = ""
 
     if not path or not os.path.exists(path):
+        # No usable path to classify: built-ins, frozen modules (zipimport),
+        # namespace packages, and modules whose source was deleted after
+        # import. Only the name is left to go on.
+        if _is_stdlib_name(top_level):
+            return _stdlib_page(top_level)
         return STATUS_UNRESOLVABLE_PATH
 
     kind = classify(path)
     if kind == "stdlib":
-        return _STDLIB_DOC_URL.format(name=top_level)
+        return _stdlib_page(top_level)
     if kind == "local":
         return STATUS_LOCAL
     return resolve_third_party_url(module_name, network=network)

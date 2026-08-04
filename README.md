@@ -46,6 +46,9 @@ https://pytest-cov.readthedocs.io/
 $ pymanual python-dateutil  # not installed; PyPI lookup
 https://dateutil.readthedocs.io/en/stable/
 
+$ pymanual winreg           # stdlib, but not importable on Linux
+https://docs.python.org/3/library/winreg.html
+
 $ pymanual definitely_no_such_xyz
 module_not_found
 ```
@@ -83,10 +86,12 @@ resolve_doc_url("json", use_cache=False)     # bypass the on-disk cache
 
 Strict order — the first step that yields a result wins.
 
+**The stdlib name check.** Steps 1 and 2 both reach points where no file path is available to classify. Both then ask whether `top_level` is in `sys.stdlib_module_names`, and if so return `https://docs.python.org/3/library/<top-level>.html`. That list is generated at build time and covers every stdlib module unconditionally, including ones belonging to other platforms (`winreg` on Linux) and ones a build omitted (`tkinter` without Tk). It is deliberately consulted **only after** a path lookup has come up empty, never before: a local `statistics.py` shadowing a stdlib name is still your own code and must return `local_module_no_external_docs`.
+
 1. **Import the module** with `importlib.import_module`.
    - On success → continue at step 2.
-   - On `ImportError`/`ValueError` → try the **distribution-name fallback** (step 5).
-2. **Get the file path** with `inspect.getfile`. If unavailable (e.g. namespace packages with no `__file__`), return `unresolvable_module_path`. Builtins (`sys`, `builtins`, …) are short-circuited as stdlib before this step.
+   - On `ImportError`/`ValueError` → apply the **stdlib name check**. This is what resolves `winreg` on Linux, and what makes `json.nosuchthing` return `json`'s page rather than reaching PyPI (which carries projects named `json`, `email`, and other short stdlib names). If it doesn't apply → try the **distribution-name fallback** (step 5).
+2. **Get the file path** with `inspect.getfile`. Builtins (`sys`, `builtins`, …) are short-circuited as stdlib before this step. If no usable path exists (namespace packages with no `__file__`, frozen modules such as `zipimport`, source deleted after import), apply the **stdlib name check**; if it doesn't apply either, return `unresolvable_module_path`.
 3. **Classify by file path only** (not `sys.path`):
    - inside `sysconfig.get_paths()["stdlib"]` → **stdlib**
    - inside `site-packages` / `dist-packages` / a venv directory → **third_party**
@@ -98,7 +103,7 @@ Strict order — the first step that yields a result wins.
      2. PyPI JSON (`https://pypi.org/pypi/<name>/json`) — same key precedence; skipped when `network=False`
      3. Heuristic last resort: `https://pypi.org/project/<name>/`
    - **local** → `local_module_no_external_docs`
-5. **Distribution-name fallback** (when `import_module` found nothing):
+5. **Distribution-name fallback** (when `import_module` found nothing and the stdlib name check didn't apply):
    - Try `importlib.metadata.metadata(<input>)` — catches cases like `pytest-cov`, `PyYAML`, `scikit-learn` whose import names don't match their distribution names. If installed → return URL from its metadata (falling back to `https://pypi.org/project/<input>/`).
    - Else, if `network=True`, query PyPI directly for `<input>`. If the package exists there → return its documentation URL.
    - Otherwise → `module_not_found`.
