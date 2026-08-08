@@ -1,6 +1,6 @@
 [project]
 name = "pymanual"
-version = "1.0.0"
+version = "1.1.0"
 description = "Resolve the documentation URL for any Python module or PyPI distribution name."
 readme = "README.md"
 authors = [
