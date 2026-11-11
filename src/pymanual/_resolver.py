@@ -16,20 +16,24 @@ Modules are *located*, never imported: a documentation lookup must not run
 arbitrary code from the environment, or ``pymanual foo`` would execute
 whatever ``foo.py`` happens to sit in the working directory.
 
+Locating happens in ``_probe``, possibly under another interpreter (see
+``_target``); this module only decides, from the facts the probe returns.
+
 Outcomes that aren't URLs surface as ``STATUS_*`` tokens so callers can
 distinguish them from real URLs without exceptions.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-from importlib.machinery import ModuleSpec
-from importlib.util import find_spec
+from typing import Any
 
-from . import _cache
-from ._classify import classify
+from . import _cache, _target
 from ._metadata import resolve_distribution_url, resolve_third_party_url
+
+log = logging.getLogger("pymanual")
 
 # Sentinel return values. Kept as public constants so CLI and library callers
 # can pattern-match on them without hard-coding the strings.
@@ -46,7 +50,7 @@ def _stdlib_page(top_level: str) -> str:
     return _STDLIB_DOC_URL.format(name=top_level)
 
 
-def _is_stdlib_name(top_level: str) -> bool:
+def _is_stdlib_name(top_level: str, facts: dict[str, Any]) -> bool:
     """True when the *name* is stdlib, independent of any file path.
 
     ``sys.stdlib_module_names`` is generated at build time and lists every
@@ -56,23 +60,14 @@ def _is_stdlib_name(top_level: str) -> bool:
     modules with no usable path, but the *wrong* thing to consult first: a
     local ``statistics.py`` shadowing a stdlib name must classify by its path.
     Callers only reach this after a path lookup has come up empty.
+
+    The target interpreter's list wins; pymanual's own is the stand-in for a
+    target older than 3.10, which has no such list.
     """
-    return top_level in sys.stdlib_module_names
-
-
-def _locate(name: str) -> ModuleSpec | None:
-    """``find_spec(name)`` with "can't be located here" folded into ``None``.
-
-    ``ImportError`` (which subsumes ``ModuleNotFoundError``, raised when a
-    parent package doesn't exist) and ``ValueError`` (empty string, or a
-    ``sys.modules`` entry whose ``__spec__`` is ``None``) all mean the same
-    thing to us. Anything else propagates: a parent package that raises at
-    import time is a real problem in the environment, not a lookup miss.
-    """
-    try:
-        return find_spec(name)
-    except (ImportError, ValueError):
-        return None
+    answer = facts.get("stdlib_name")
+    if answer is None:
+        return top_level in sys.stdlib_module_names
+    return bool(answer)
 
 
 def resolve_doc_url(
@@ -80,6 +75,7 @@ def resolve_doc_url(
     *,
     network: bool = True,
     use_cache: bool = True,
+    python: str | os.PathLike[str] | None = None,
 ) -> str:
     """Return a docs URL for ``module_name`` or a ``STATUS_*`` sentinel.
 
@@ -89,64 +85,66 @@ def resolve_doc_url(
 
     With ``network=False`` the PyPI HTTP fallback is skipped; a third-party
     module with no local metadata may then return ``STATUS_NOT_FOUND``.
+
+    ``python`` chooses the environment the module is located in:
+
+    * ``None`` (default) — this process's own environment.
+    * a path to an interpreter, a virtual environment directory, or a
+      command name on ``PATH`` — that environment. Raises ``ValueError`` if
+      it names no interpreter, and ``RuntimeError`` if it can't answer.
+    * ``"auto"`` — ``$PYMANUAL_PYTHON``, else ``$VIRTUAL_ENV``, else
+      ``python3`` on ``PATH``; falls back to this process if that
+      interpreter can't run. This is what the CLI uses.
     """
+    target = _target.select(python)
+
     if use_cache:
-        cached = _cache.lookup(module_name)
+        cached = _cache.lookup(target.cache_key(module_name))
         if cached is not None:
+            log.debug("cache hit for %r", module_name)
             return cached
 
-    result = _resolve(module_name, network=network)
+    facts, used = _target.gather(module_name, target)
+    result = _resolve(module_name, facts, network=network)
 
     if use_cache and result not in _STATUS_TOKENS:
-        _cache.store(module_name, result)
+        _cache.store(used.cache_key(module_name), result)
 
     return result
 
 
-def _resolve(module_name: str, *, network: bool) -> str:
+def _resolve(module_name: str, facts: dict[str, Any], *, network: bool) -> str:
     top_level = module_name.split(".", 1)[0]
 
-    # Built-ins are checked before import_module() because inspect.getfile raises
-    # TypeError on them — there's no path to classify.
-    if top_level in sys.builtin_module_names:
+    # Built-ins have no path to classify; the name alone settles them.
+    if facts["builtin"]:
         return _stdlib_page(top_level)
 
-    spec = _locate(module_name)
-
-    if spec is None and top_level != module_name:
-        # The leaf may be missing while the package itself is real. Retrying
-        # the top level keeps the answer derived from what's installed here:
-        # without it, yaml.nosuchthing would reach the distribution fallback,
-        # which doesn't apply the import-name → distribution-name mapping.
-        spec = _locate(top_level)
-
-    if spec is None:
-        # Not locatable *here* doesn't mean not stdlib: winreg on Linux and
+    if not facts["located"]:
+        # Not locatable *there* doesn't mean not stdlib: winreg on Linux and
         # tkinter on a build without Tk are both documented modules. Answer
         # from the name before falling through to PyPI, so a project that
         # happens to share a stdlib name can't hijack the result.
-        if _is_stdlib_name(top_level):
+        if _is_stdlib_name(top_level, facts):
             return _stdlib_page(top_level)
         # Otherwise it may still be a known PyPI distribution (e.g. the user
         # isn't in the env where it's installed).
-        url = resolve_distribution_url(module_name, network=network)
+        url = resolve_distribution_url(module_name, facts, network=network)
         if url is not None:
             return url
         return STATUS_NOT_FOUND
 
-    origin = spec.origin
-    if not origin or not os.path.exists(origin):
-        # No usable path to classify. `origin` is None for namespace packages
-        # and a sentinel string ('frozen', 'built-in') for modules with no
-        # file at all; it can also name a source file deleted since import.
-        # Only the name is left to go on.
-        if _is_stdlib_name(top_level):
+    if facts["origin"] is None:
+        # Located, but no usable path to classify: a namespace package, a
+        # frozen module, or a source file deleted since import. Only the
+        # name is left to go on.
+        if _is_stdlib_name(top_level, facts):
             return _stdlib_page(top_level)
         return STATUS_UNRESOLVABLE_PATH
 
-    kind = classify(origin)
+    kind = facts["kind"]
     if kind == "stdlib":
         return _stdlib_page(top_level)
     if kind == "local":
         return STATUS_LOCAL
-    return resolve_third_party_url(module_name, network=network)
+    return resolve_third_party_url(module_name, facts, network=network)

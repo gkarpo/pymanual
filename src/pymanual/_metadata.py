@@ -2,15 +2,17 @@
 
 Two entry points:
 
-* :func:`resolve_third_party_url` — for modules we know are importable and
-  classified as third-party. Always returns a URL (falls back to the generic
-  PyPI project page).
-* :func:`resolve_distribution_url` — for names that aren't importable locally
-  but might still exist on PyPI. Returns ``None`` if nothing matches.
+* :func:`resolve_third_party_url` — for modules located and classified as
+  third-party. Always returns a URL (falls back to the generic PyPI project
+  page).
+* :func:`resolve_distribution_url` — for names that couldn't be located but
+  might still exist on PyPI. Returns ``None`` if nothing matches.
 
 Both prefer installed distribution metadata (``Project-URL`` entries) over
 the PyPI JSON API, since installed metadata is cheap and doesn't hit the
-network.
+network. Installed metadata is read by ``_probe`` in the target environment
+and arrives here in its facts dict; this module never touches
+``importlib.metadata`` itself.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from importlib import metadata
 from typing import Any, Iterable
 
 _PYPI_JSON = "https://pypi.org/pypi/{name}/json"
@@ -32,18 +33,21 @@ _DOC_KEY_PREFERENCE = ("documentation", "docs", "doc")
 _HOME_KEY_PREFERENCE = ("homepage", "home")
 
 
-def resolve_third_party_url(module_name: str, *, network: bool = True) -> str:
+def resolve_third_party_url(
+    module_name: str, facts: dict[str, Any], *, network: bool = True
+) -> str:
     """Return a docs URL for a third-party ``module_name``; never ``None``.
 
-    Maps the import name to a distribution name via
-    ``importlib.metadata.packages_distributions``, then checks installed
-    metadata and (optionally) the PyPI JSON API. Falls back to the generic
-    ``pypi.org/project/<name>/`` page so the caller always gets *something*.
+    The probe has already mapped the import name to a distribution name via
+    ``importlib.metadata.packages_distributions`` (``facts["dist"]``). Checks
+    that distribution's installed metadata, then (optionally) the PyPI JSON
+    API, and falls back to the generic ``pypi.org/project/<name>/`` page so
+    the caller always gets *something*.
     """
     top_level = module_name.split(".", 1)[0]
-    dist_name = _resolve_distribution_name(top_level)
+    dist_name = facts.get("dist") or top_level
 
-    url = _from_installed_metadata(dist_name)
+    url = _from_installed_metadata(dist_name, facts)
     if url:
         return url
 
@@ -57,15 +61,17 @@ def resolve_third_party_url(module_name: str, *, network: bool = True) -> str:
     return _PYPI_PROJECT.format(name=dist_name)
 
 
-def resolve_distribution_url(dist_name: str, *, network: bool = True) -> str | None:
+def resolve_distribution_url(
+    dist_name: str, facts: dict[str, Any], *, network: bool = True
+) -> str | None:
     """Resolve a docs URL for a name assumed to be a distribution (PyPI) name.
 
     Tries the input as-is, then falls back to its top-level segment so that
     dotted module names like ``playwright.sync_api`` still resolve via the
     ``playwright`` distribution.
 
-    Returns None when no candidate is installed locally and (with network
-    enabled) none can be found on PyPI.
+    Returns None when no candidate is installed in the target environment
+    and (with network enabled) none can be found on PyPI.
     """
     candidates = [dist_name]
     top_level = dist_name.split(".", 1)[0]
@@ -73,17 +79,14 @@ def resolve_distribution_url(dist_name: str, *, network: bool = True) -> str | N
         candidates.append(top_level)
 
     for candidate in candidates:
-        url = _try_distribution(candidate, network=network)
+        url = _try_distribution(candidate, facts, network=network)
         if url is not None:
             return url
     return None
 
 
-def _try_distribution(dist_name: str, *, network: bool) -> str | None:
-    try:
-        meta = metadata.metadata(dist_name)
-    except metadata.PackageNotFoundError:
-        meta = None
+def _try_distribution(dist_name: str, facts: dict[str, Any], *, network: bool) -> str | None:
+    meta = _installed(dist_name, facts)
 
     if meta is not None:
         url = _url_from_metadata(meta)
@@ -98,33 +101,27 @@ def _try_distribution(dist_name: str, *, network: bool) -> str | None:
     return None
 
 
-def _resolve_distribution_name(top_level: str) -> str:
-    try:
-        mapping = metadata.packages_distributions()
-    except Exception:
-        mapping = {}
-    dists = mapping.get(top_level)
-    if dists:
-        return dists[0]
-    return top_level
+def _installed(dist_name: str, facts: dict[str, Any]) -> dict[str, Any] | None:
+    """The probe's metadata for ``dist_name``; ``None`` when not installed."""
+    return (facts.get("metadata") or {}).get(dist_name)
 
 
-def _from_installed_metadata(dist_name: str) -> str | None:
-    try:
-        meta = metadata.metadata(dist_name)
-    except metadata.PackageNotFoundError:
+def _from_installed_metadata(dist_name: str, facts: dict[str, Any]) -> str | None:
+    meta = _installed(dist_name, facts)
+    if meta is None:
         return None
     return _url_from_metadata(meta)
 
 
-def _url_from_metadata(meta: Any) -> str | None:
-    project_urls = meta.get_all("Project-URL") or []
+def _url_from_metadata(meta: dict[str, Any]) -> str | None:
+    """Best URL from the ``Project-URL``/``Home-page`` fields the probe read."""
+    project_urls = meta.get("project_urls") or []
     parsed = _parse_project_urls(project_urls)
     url = _pick_best(parsed)
     if url:
         return url
 
-    home = meta.get("Home-page")
+    home = meta.get("home_page")
     if home and home.strip() and home.strip().lower() != "unknown":
         return home.strip()
     return None

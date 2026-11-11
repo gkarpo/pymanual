@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The CLI now locates modules in **your** Python environment, not pymanual's own.
+  Installed with `uv tool` or `pipx`, pymanual lives in an isolated venv that
+  holds nothing but itself, so `pymanual markdown_it` returned `module_not_found`
+  even when `python3 -c "import markdown_it"` worked. The CLI now runs a small
+  probe under `$PYMANUAL_PYTHON`, else the active `$VIRTUAL_ENV`, else `python3`
+  on `PATH`, and falls back to its own environment if that interpreter can't
+  answer within 10 seconds.
+- `--python PATH` picks the interpreter explicitly: an interpreter path, a
+  virtual environment directory, or a command name on `PATH`.
+- `-v`/`--verbose` explains on stderr which interpreter was used and why.
+- `resolve_doc_url(..., python=...)` exposes the same choice to library callers.
+  The default stays `None` (resolve in the calling process); pass `"auto"` for
+  the CLI's detection.
+
+### Changed
+
+- Cache entries resolved through another interpreter are keyed by that
+  interpreter's path, because the same name can be a third-party package in one
+  environment and your own module in another. In-process entries keep the bare
+  name, so existing cache files stay valid.
+- The working directory is not on the probe's `sys.path`, matching the
+  installed `pymanual` command, whose `sys.path[0]` is its own `bin` directory.
+
 ## [1.1.0] - 2026-08-04
 
 ### Added
@@ -62,5 +89,6 @@ Initial release.
 - `resolve_doc_url()` library entry point.
 - On-disk LRU cache, 100 entries, at `$XDG_CACHE_HOME/pymanual/cache.json`.
 
+[Unreleased]: https://github.com/gkarpo/pymanual/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/gkarpo/pymanual/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/gkarpo/pymanual/releases/tag/v1.0.0

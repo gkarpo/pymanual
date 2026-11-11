@@ -333,3 +333,119 @@ def test_private_third_party_package_resolves_via_distribution():
     """``_pytest`` maps to the ``pytest`` distribution through packages_distributions()."""
     url = resolve_doc_url("_pytest.config", network=False, use_cache=False)
     assert url.startswith("http") and "pytest" in url
+
+
+# --------------------------------------------------------------------------
+# Resolving in another environment (python=...)
+#
+# These run the probe under a real, separate venv (``target_env``), the way
+# a ``uv tool``/``pipx`` install of pymanual reaches the user's environment.
+# --------------------------------------------------------------------------
+
+
+def test_module_installed_only_in_target_resolves_there(target_env):
+    """The reason targets exist: pymanual's own env can't see the module."""
+    assert resolve_doc_url("targetonlypkg", network=False, use_cache=False) == STATUS_NOT_FOUND
+    assert (
+        resolve_doc_url("targetonlypkg", network=False, use_cache=False, python=target_env.python)
+        == "https://target.example/docs/"
+    )
+
+
+def test_target_maps_import_name_to_its_distribution(target_env):
+    """``targetonlypkg`` → ``target-only-dist`` via the target's packages_distributions()."""
+    url = resolve_doc_url(
+        "targetonlypkg.nosuchthing", network=False, use_cache=False, python=target_env.python
+    )
+    assert url == "https://target.example/docs/"
+
+
+def test_distribution_name_installed_only_in_target(target_env):
+    url = resolve_doc_url(
+        "target-only-dist", network=False, use_cache=False, python=target_env.python
+    )
+    assert url == "https://target.example/docs/"
+
+
+@pytest.mark.parametrize("name", ["json", "os", "sys", "winreg", "email.mime.text"])
+def test_stdlib_resolves_through_target(target_env, name):
+    top = name.split(".")[0]
+    assert resolve_doc_url(
+        name, network=False, use_cache=False, python=target_env.python
+    ) == _PY_DOCS.format(name=top)
+
+
+def test_local_module_in_target_classifies_as_local(target_env, tmp_path, monkeypatch):
+    """Classification uses the target's own stdlib root and paths.
+
+    ``statistics`` also checks that a local file shadowing a stdlib name still
+    classifies by path when the name check runs on the target's list.
+    """
+    (tmp_path / "targetlocalmod.py").write_text("VALUE = 1\n")
+    (tmp_path / "statistics.py").write_text("VALUE = 1\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    for name in ("targetlocalmod", "statistics"):
+        assert (
+            resolve_doc_url(name, network=False, use_cache=False, python=target_env.python)
+            == STATUS_LOCAL
+        )
+
+
+def test_target_does_not_execute_the_leaf(target_env, tmp_path):
+    sentinel = tmp_path / "target-leaf-executed.flag"
+    target_env.write("tsidepkg/__init__.py")
+    target_env.write("tsidepkg/leaf.py", _side_effect_source(sentinel))
+
+    resolve_doc_url("tsidepkg.leaf", network=False, use_cache=False, python=target_env.python)
+    assert not sentinel.exists(), "resolving through the target executed the leaf module"
+
+
+def test_target_executes_parent_packages_residual_risk(target_env, tmp_path):
+    """The parent-package exception carries over to the target environment."""
+    sentinel = tmp_path / "target-parent-executed.flag"
+    target_env.write("tsidepkg2/__init__.py", _side_effect_source(sentinel))
+    target_env.write("tsidepkg2/leaf.py", "VALUE = 1\n")
+
+    resolve_doc_url("tsidepkg2.leaf", network=False, use_cache=False, python=target_env.python)
+    assert sentinel.exists()
+
+
+def test_target_ignores_the_working_directory(target_env, tmp_path, monkeypatch):
+    """``python -c`` would put the cwd on sys.path; the probe takes it off.
+
+    That matches an installed ``pymanual`` command (whose sys.path[0] is its
+    bin directory) and keeps a cwd package from running as a parent.
+    """
+    (tmp_path / "cwdonlymod.py").write_text("VALUE = 1\n")
+    monkeypatch.chdir(tmp_path)
+    assert (
+        resolve_doc_url("cwdonlymod", network=False, use_cache=False, python=target_env.python)
+        == STATUS_NOT_FOUND
+    )
+
+
+def test_parent_package_printing_does_not_corrupt_the_answer(target_env):
+    """Output from importing a parent goes to stderr, not into the probe's JSON."""
+    target_env.write(
+        "tnoisypkg/__init__.py",
+        "import os\nprint('hello from python')\nos.write(1, b'hello from the fd\\n')\n",
+    )
+    target_env.write("tnoisypkg/leaf.py")
+    target_env.write(
+        "tnoisy_dist-1.0.dist-info/METADATA",
+        "Metadata-Version: 2.1\nName: tnoisy-dist\nVersion: 1.0\n"
+        "Project-URL: Documentation, https://noisy.example/\n",
+    )
+    target_env.write("tnoisy_dist-1.0.dist-info/top_level.txt", "tnoisypkg\n")
+    assert (
+        resolve_doc_url("tnoisypkg.leaf", network=False, use_cache=False, python=target_env.python)
+        == "https://noisy.example/"
+    )
+
+
+def test_parent_package_raising_in_target_propagates(target_env):
+    """As in-process: a parent that fails to import is an error, not a status."""
+    target_env.write("tbrokenpkg/__init__.py", "raise RuntimeError('broken parent')\n")
+    target_env.write("tbrokenpkg/leaf.py")
+    with pytest.raises(RuntimeError, match="broken parent"):
+        resolve_doc_url("tbrokenpkg.leaf", network=False, use_cache=False, python=target_env.python)

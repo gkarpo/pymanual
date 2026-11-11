@@ -12,7 +12,7 @@ pipx install pymanual
 uv tool install pymanual
 ```
 
-This puts `pymanual` on your `PATH`.
+This puts `pymanual` on your `PATH`. It still looks modules up in the environment you're working in, not in its own isolated one — see [Which Python environment](#which-python-environment).
 
 Developing on the project itself instead:
 
@@ -24,11 +24,11 @@ uv sync
 ## CLI
 
 ```
-pymanual <module> [--no-network] [--no-cache]
+pymanual <module> [--python PATH] [--no-network] [--no-cache] [-v]
 pymanual --clear-cache
 ```
 
-Exit code is `0` when a URL is returned, `1` when a status token is returned.
+Exit code is `0` when a URL is returned, `1` when a status token is returned, and `2` for a usage error or when the chosen interpreter fails (for example, a parent package of a dotted name raises on import); the error goes to stderr and stdout stays empty.
 
 ```bash
 $ pymanual json
@@ -57,6 +57,8 @@ If you're working inside the project source, prefix every command with `uv run` 
 
 ### Flags
 
+- `--python PATH` — the interpreter to locate the module with: an interpreter path, a virtual environment directory, or a command name on `PATH`. Defaults to auto-detection — see [Which Python environment](#which-python-environment).
+- `-v`, `--verbose` — explain on stderr which interpreter was used and why, and report cache hits.
 - `--no-network` — skip the PyPI HTTP fallback (step **4.ii** below for installed third-party modules, and the second half of step **5** for the distribution-name fallback). Resolution stays fully offline.
 - `--no-cache` — bypass the local cache for that one call (no read, no write).
 - `--clear-cache` — delete the cache file and exit.
@@ -80,11 +82,36 @@ resolve_doc_url("nope_xyz")             # 'module_not_found'
 # Same options as the CLI flags:
 resolve_doc_url("pytest", network=False)     # offline-only
 resolve_doc_url("json", use_cache=False)     # bypass the on-disk cache
+
+# Where to locate the module (default None: this process's environment):
+resolve_doc_url("markdown_it", python="/usr/bin/python3")
+resolve_doc_url("numpy", python=".venv")     # a venv directory works too
+resolve_doc_url("numpy", python="auto")      # the CLI's auto-detection
 ```
+
+An explicit `python` that names no interpreter raises `ValueError`; one that can't answer raises `RuntimeError`. With `"auto"`, a failing interpreter falls back to the calling process instead.
+
+## Which Python environment
+
+A module can only be located in an environment where it's installed. `pymanual` installed with `uv tool` or `pipx` lives in its own isolated venv, so the CLI locates modules with *your* interpreter instead. It runs a small probe script under it, which reports what it finds as JSON; the decisions below are then made by `pymanual` itself.
+
+The CLI picks the first of:
+
+1. `--python PATH`, if given. If it can't run, that's an error.
+2. `$PYMANUAL_PYTHON`.
+3. `$VIRTUAL_ENV` — the activated virtual environment (`uv run` sets this too).
+4. `python3` (else `python`) on `PATH`.
+5. `pymanual`'s own environment.
+
+From step 2 onward, an interpreter that crashes, returns unreadable output or takes longer than 10 seconds is skipped in favour of `pymanual`'s own environment; `-v` shows when that happens. When the chosen interpreter *is* `pymanual`'s own environment, no subprocess is started.
+
+The probe drops the working directory from `sys.path`, as the installed `pymanual` command does, so a file next to you is only found if it's on `PYTHONPATH` or installed. It shares the [never imported](#modules-are-never-imported) guarantee, including its one exception for parent packages. Starting an interpreter also runs that environment's own `site` and `.pth` hooks, as typing `python3` would.
+
+The library defaults to `python=None` — locate in the calling process — so existing callers never start a subprocess they didn't ask for.
 
 ## Resolution strategy
 
-Strict order — the first step that yields a result wins.
+Strict order — the first step that yields a result wins. Every lookup (`find_spec`, `sys.stdlib_module_names`, the stdlib root, installed metadata) happens in the environment chosen above; only the PyPI requests run in `pymanual` itself.
 
 **The stdlib name check.** Steps 1 and 2 both reach points where no file path is available to classify. Both then ask whether `top_level` is in `sys.stdlib_module_names`, and if so return `https://docs.python.org/3/library/<top-level>.html`. That list is generated at build time and covers every stdlib module unconditionally, including ones belonging to other platforms (`winreg` on Linux) and ones a build omitted (`tkinter` without Tk). It is deliberately consulted **only after** a path lookup has come up empty, never before: a local `statistics.py` shadowing a stdlib name is still your own code and must return `local_module_no_external_docs`.
 
@@ -119,10 +146,10 @@ One exception survives, by necessity: for a **dotted** name, `find_spec` imports
 
 ## Local cache
 
-Successful URL resolutions are cached at `$XDG_CACHE_HOME/pymanual/cache.json` (defaults to `~/.cache/pymanual/cache.json`). Subsequent lookups for the same input string return instantly without hitting `find_spec`, `importlib.metadata`, or PyPI.
+Successful URL resolutions are cached at `$XDG_CACHE_HOME/pymanual/cache.json` (defaults to `~/.cache/pymanual/cache.json`). Subsequent lookups for the same input string return instantly without starting an interpreter or hitting `find_spec`, `importlib.metadata`, or PyPI.
 
 - Status tokens (`module_not_found`, etc.) are **not** cached, so installing a previously-missing module just works on the next call.
-- Cache key is the verbatim input string — `pytest-cov` and `pytest_cov` are independent entries.
+- Cache key is the verbatim input string — `pytest-cov` and `pytest_cov` are independent entries — prefixed with the interpreter's path when resolved through another interpreter. The same name can be a package in one environment and your own module in another, so their results are kept apart. The 100-entry cap is shared.
 - LRU-bounded at 100 entries; the oldest entry is evicted when the cap is exceeded.
 - No TTL; entries live until eviction, until you run `pymanual --clear-cache`, or until you delete the file.
 - Override location for tests/sandboxing via the `PYMANUAL_CACHE_DIR` env var.

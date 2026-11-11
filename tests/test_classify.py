@@ -6,7 +6,7 @@ import sysconfig
 
 import pytest
 
-from pymanual._classify import classify
+from pymanual._probe import classify
 
 
 def test_stdlib_path_classified_as_stdlib():

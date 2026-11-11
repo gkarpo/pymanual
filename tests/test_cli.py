@@ -43,19 +43,19 @@ def test_local_module_exits_one(capsys, tmp_path, monkeypatch):
 def test_no_network_flag_reaches_resolver():
     with mock.patch("pymanual._cli.resolve_doc_url", return_value="https://x/") as r:
         main(["somemod", "--no-network"])
-    r.assert_called_once_with("somemod", network=False, use_cache=True)
+    r.assert_called_once_with("somemod", network=False, use_cache=True, python="auto")
 
 
 def test_no_cache_flag_reaches_resolver():
     with mock.patch("pymanual._cli.resolve_doc_url", return_value="https://x/") as r:
         main(["somemod", "--no-cache"])
-    r.assert_called_once_with("somemod", network=True, use_cache=False)
+    r.assert_called_once_with("somemod", network=True, use_cache=False, python="auto")
 
 
 def test_defaults_enable_network_and_cache():
     with mock.patch("pymanual._cli.resolve_doc_url", return_value="https://x/") as r:
         main(["somemod"])
-    r.assert_called_once_with("somemod", network=True, use_cache=True)
+    r.assert_called_once_with("somemod", network=True, use_cache=True, python="auto")
 
 
 def test_clear_cache_removes_file_and_reports(capsys):

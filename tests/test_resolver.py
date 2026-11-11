@@ -52,7 +52,9 @@ def test_third_party_routes_through_metadata_resolver():
     ) as m:
         url = resolve_doc_url("pytest", network=False)
     assert url == "https://example.com/docs"
-    m.assert_called_once_with("pytest", network=False)
+    (name, facts), kwargs = m.call_args
+    assert name == "pytest" and kwargs == {"network": False}
+    assert facts["kind"] == "third_party" and facts["dist"] == "pytest"
 
 
 def test_local_module_returns_local_status(tmp_path, monkeypatch):
